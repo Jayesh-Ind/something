@@ -225,12 +225,12 @@ Tomorrow when you connect your modules, use these integration contracts:
 **Responsibility**: Timeline visualizer, interactive multi-camera player, search, alert dashboard.
 - **Integration Options**:
   1. **REST APIs**: `GET /api/v1/timeline/{case_id}`, `GET /api/v1/timeline/{case_id}/{channel_id}` with start/end time and limit/offset pagination.
-  2. **Live Updates**: Connect WebSocket client to `ws://<host>:8000/ws/live-timeline`.
+  2. **Live Updates**: Connect WebSocket client to `ws://<host>:8000/ws/live-timeline?case_id={case_id}` (case isolation is strictly enforced; subscriptions require `case_id`).
 - **WebSocket Messages Received**:
   ```json
-  { "type": "timeline_event", "data": { ... } }
-  { "type": "correlated_event", "data": { ... } }
-  { "type": "timeline_anomaly", "data": { "channel_id": "CAM04", "anomalies": ["NON_MONOTONIC_TIME_JUMP"] } }
+  { "type": "timeline_event", "case_id": "CASE-1", "data": { ... } }
+  { "type": "cross_camera_correlation", "case_id": "CASE-1", "correlation": { ... } }
+  { "type": "timeline_anomaly", "case_id": "CASE-1", "data": { "channel_id": "CAM04", "anomalies": ["NON_MONOTONIC_TIME_JUMP"] } }
   ```
 
 ---
@@ -259,7 +259,7 @@ uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 API Documentation will be accessible at: `http://localhost:8000/docs`
 
 ### Running the Test Suite
-Run all 35 tests with pytest:
+Run all 54 comprehensive unit and regression tests with pytest:
 ```bash
 python -m pytest tests/ -v
 ```

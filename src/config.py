@@ -23,6 +23,19 @@ class AppSettings(BaseSettings):
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./forensic_timeline.db"
 
+    # CORS Settings
+    CORS_ORIGINS: list[str] = Field(
+        default=[
+            "http://localhost:3000",
+            "http://localhost:8000",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:8000",
+            "http://127.0.0.1:8080",
+        ],
+        description="Allowed CORS origin domains for frontend integration",
+    )
+
     # Pipeline Settings (Configurable buffers & backpressure thresholds)
     PIPELINE_QUEUE_MAX_SIZE: int = Field(
         default=2000,

@@ -103,6 +103,17 @@ class TimelineService:
             self.session.add(camera)
 
         await self.session.flush()
+
+        # Update pipeline calibration cache (Fix #3)
+        from src.timeline.pipeline import pipeline_instance
+
+        pipeline_instance.set_camera_calibration(
+            case_id=case_id,
+            channel_id=channel_id,
+            clock_offset_ms=clock_offset_ms,
+            drift_rate_ppm=drift_rate_ppm,
+            timezone=tz_name,
+        )
         return camera
 
     async def query_timeline(self, query: TimelineQuery) -> TimelineResponse:
@@ -192,6 +203,17 @@ class TimelineService:
         self.session.add(correction)
         await self.session.flush()
 
+        # Update pipeline calibration cache (Fix #3)
+        from src.timeline.pipeline import pipeline_instance
+
+        pipeline_instance.set_camera_calibration(
+            case_id=case_id,
+            channel_id=channel_id,
+            clock_offset_ms=offset_ms,
+            drift_rate_ppm=drift_rate_ppm,
+            reference_time_utc=reference_time,
+        )
+
         return TimestampCorrection(
             id=correction.id,
             case_id=case_id,
@@ -277,6 +299,8 @@ class TimelineService:
             file_offset_bytes=db_ev.file_offset_bytes,
             pts=db_ev.pts,
             dts=db_ev.dts,
+            time_base_num=getattr(db_ev, "time_base_num", 1) or 1,
+            time_base_den=getattr(db_ev, "time_base_den", 1000) or 1000,
             payload=json.loads(db_ev.payload_json) if db_ev.payload_json else {},
             source_reference=(
                 json.loads(db_ev.source_reference_json) if db_ev.source_reference_json else {}

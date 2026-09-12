@@ -9,7 +9,7 @@ VIDEO = Path(r"C:\Users\Jayesh\Downloads\gettyimages-1499035459-640_adpp.mp4")
 API = "http://127.0.0.1:8000/api/v1/ingest/frame-metadata"
 
 CASE_ID = "GETTY-CCTV-PTS-TEST-FIXED"
-EVIDENCE_ID = "mot17_test_mp4"
+EVIDENCE_ID = "getty_cctv_mp4"
 CHANNEL_ID = "CAM-01"
 
 REFERENCE_START = "2026-09-10T12:00:00+00:00"

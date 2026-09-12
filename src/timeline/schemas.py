@@ -153,6 +153,8 @@ class TimelineEvent(BaseModel):
     file_offset_bytes: int | None = None
     pts: int | None = None
     dts: int | None = None
+    time_base_num: int = Field(default=1, ge=1)
+    time_base_den: int = Field(default=1000, ge=1)
     payload: dict[str, Any] = Field(default_factory=dict)
     source_reference: dict[str, Any] = Field(default_factory=dict)
     anomaly_flags: list[str] = Field(default_factory=list)
@@ -257,6 +259,8 @@ class CorrelationRequest(BaseModel):
     case_id: str
     window_seconds: float | None = Field(default=None, ge=0.1, le=3600.0)
     channel_ids: list[str] | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
 
 
 class CorrelationResponse(BaseModel):

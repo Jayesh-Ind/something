@@ -2,9 +2,10 @@
 
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import MetaData
+from sqlalchemy import MetaData, event
 from sqlalchemy.ext.asyncio import (
     AsyncAttrs,
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
@@ -31,12 +32,26 @@ class Base(AsyncAttrs, DeclarativeBase):
     metadata = metadata
 
 
+def enable_sqlite_pragmas(target_engine: AsyncEngine) -> None:
+    """Configure SQLite connection with foreign keys and WAL journal mode."""
+
+    def on_connect(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON;")
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.close()
+
+    event.listen(target_engine.sync_engine, "connect", on_connect)
+
+
 # Create async engine
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
     future=True,
 )
+if "sqlite" in settings.DATABASE_URL:
+    enable_sqlite_pragmas(engine)
 
 SessionFactory = async_sessionmaker(
     bind=engine,

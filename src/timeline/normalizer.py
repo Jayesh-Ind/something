@@ -105,6 +105,19 @@ class TimelineNormalizer:
 
         # 3. Handle PTS media-relative offset if applicable
         if timestamp_format == TimestampFormat.MEDIA_RELATIVE_PTS and pts is not None:
+            if time_base_den <= 0:
+                errors.append(
+                    f"Invalid media time_base denominator: {time_base_den}. Denominator must be >= 1."
+                )
+                anomaly_flags.append(AnomalyFlag.MALFORMED_RAW_TIMESTAMP.value)
+                return NormalizationResult(
+                    success=False,
+                    raw_timestamp=raw_clean,
+                    timestamp_source=timestamp_source,
+                    detected_format="INVALID_TIME_BASE",
+                    anomaly_flags=anomaly_flags,
+                    errors=errors,
+                )
             pts_seconds = (pts * time_base_num) / float(time_base_den)
             utc_dt = utc_dt + timedelta(seconds=pts_seconds)
             detected_fmt = f"{detected_fmt}+PTS({pts})"
@@ -160,15 +173,37 @@ class TimelineNormalizer:
             if re.match(r"^-?\d+(\.\d+)?$", raw_str):
                 try:
                     val = float(raw_str)
-                    # Distinguish seconds vs milliseconds if auto
-                    if fmt_hint == TimestampFormat.UNIX_EPOCH_MS or (
-                        fmt_hint == TimestampFormat.AUTO and val > 1e11
-                    ):
-                        dt = datetime.fromtimestamp(val / 1000.0, tz=UTC)
-                        return dt, TimestampFormat.UNIX_EPOCH_MS.value
-                    else:
-                        dt = datetime.fromtimestamp(val, tz=UTC)
-                        return dt, TimestampFormat.UNIX_EPOCH_S.value
+                    if fmt_hint == TimestampFormat.UNIX_EPOCH_MS:
+                        seconds_val = val / 1000.0
+                        fmt_name = TimestampFormat.UNIX_EPOCH_MS.value
+                    elif fmt_hint == TimestampFormat.UNIX_EPOCH_S:
+                        seconds_val = val
+                        fmt_name = TimestampFormat.UNIX_EPOCH_S.value
+                    else:  # AUTO magnitude detection
+                        # > 1e16 -> nanoseconds (e.g. 1773144000123456789)
+                        if abs(val) > 1e16:
+                            seconds_val = val / 1e9
+                            fmt_name = "UNIX_EPOCH_NS"
+                        # > 1e13 -> microseconds (e.g. 1773144000123456)
+                        elif abs(val) > 1e13:
+                            seconds_val = val / 1e6
+                            fmt_name = "UNIX_EPOCH_US"
+                        # > 1e10 -> milliseconds (e.g. 1773144000000)
+                        elif abs(val) > 1e10:
+                            seconds_val = val / 1e3
+                            fmt_name = TimestampFormat.UNIX_EPOCH_MS.value
+                        else:
+                            seconds_val = val
+                            fmt_name = TimestampFormat.UNIX_EPOCH_S.value
+
+                    # Calendar range safety check: year must be reasonable (-62135596800 to 253402300799)
+                    if not (-62135596800 <= seconds_val <= 253402300799):
+                        raise ValueError(
+                            f"Epoch seconds {seconds_val} out of valid calendar range"
+                        )
+
+                    dt = datetime.fromtimestamp(seconds_val, tz=UTC)
+                    return dt, fmt_name
                 except (ValueError, OverflowError, OSError) as exc:
                     if fmt_hint != TimestampFormat.AUTO:
                         errors.append(f"Invalid epoch timestamp '{raw_str}': {exc}")

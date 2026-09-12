@@ -7,6 +7,7 @@ automatically establish personal identity.
 
 import asyncio
 import math
+from collections import OrderedDict
 from datetime import datetime
 from uuid import uuid4
 
@@ -36,20 +37,43 @@ class EventCorrelator:
 
         # In-memory sliding window buffer sorted by utc_timestamp
         self._buffer: list[TimelineEvent] = []
-        self._processed_event_ids: set[str] = set()
+        self._processed_event_ids: OrderedDict[str, None] = OrderedDict()
         self._lock = asyncio.Lock()
+
+    @staticmethod
+    def _is_correlatable_event(ev: TimelineEvent) -> bool:
+        """Determine whether an event carries semantic significance for cross-camera correlation.
+
+        Forensic Rule: Raw video FRAME_INDEX events without AI detections, motion,
+        or forensic anomalies must not produce cross-camera correlation explosion.
+        """
+        if ev.event_type != EventType.FRAME_INDEX:
+            return True
+        payload = ev.payload or {}
+        if (
+            payload.get("object_class")
+            or payload.get("motion")
+            or payload.get("track_id")
+            or payload.get("embedding")
+            or ev.anomaly_flags
+        ):
+            return True
+        return False
 
     async def add_event(self, event: TimelineEvent) -> list[CorrelatedEvent]:
         """Ingest event, correlate against current window, and prune old buffer items."""
+        # Non-correlatable raw frame events skip correlation completely (Fix #1)
+        if not self._is_correlatable_event(event):
+            return []
+
         async with self._lock:
-            # Deduplicate
+            # Deterministic LRU deduplication (Fix #7)
             if event.event_id in self._processed_event_ids:
                 return []
 
-            self._processed_event_ids.add(event.event_id)
+            self._processed_event_ids[event.event_id] = None
             if len(self._processed_event_ids) > settings.DEDUPLICATION_CACHE_SIZE:
-                # Evict half of old seen IDs
-                self._processed_event_ids = set(list(self._processed_event_ids)[-5000:])
+                self._processed_event_ids.popitem(last=False)
 
             # Insert sorted by utc_timestamp to handle out-of-order arrival
             idx = self._find_insertion_index(event.utc_timestamp)
@@ -73,8 +97,11 @@ class EventCorrelator:
             return []
 
         window = custom_window_seconds or self.window_seconds
-        # Sort chronologically by UTC timestamp
-        sorted_events = sorted(events, key=lambda e: e.utc_timestamp)
+        # Filter for correlatable events and sort chronologically by UTC timestamp
+        sorted_events = sorted(
+            [e for e in events if self._is_correlatable_event(e)],
+            key=lambda e: e.utc_timestamp,
+        )
         correlations: list[CorrelatedEvent] = []
         seen_pairs: set[tuple[str, str]] = set()
 
@@ -102,6 +129,9 @@ class EventCorrelator:
 
     def _evaluate_correlations(self, target_event: TimelineEvent) -> list[CorrelatedEvent]:
         """Evaluate target event against active buffer within +/- window_seconds."""
+        if not self._is_correlatable_event(target_event):
+            return []
+
         correlations: list[CorrelatedEvent] = []
         target_time = target_event.utc_timestamp
 
@@ -110,6 +140,8 @@ class EventCorrelator:
                 continue
             if ev.channel_id == target_event.channel_id:
                 continue  # Cross-camera focus
+            if not self._is_correlatable_event(ev):
+                continue
 
             dt = abs((target_time - ev.utc_timestamp).total_seconds())
             if dt <= self.window_seconds:

@@ -27,7 +27,7 @@ async def test_pipeline_ingestion_and_processing():
     )
 
     dedup_id = await pipeline.submit_raw_frame(frame)
-    assert "frame:TEST-CASE:CAM01:1" in dedup_id
+    assert f"frame:{frame.case_id}:{frame.evidence_id}:{frame.channel_id}:{frame.frame_index}" in dedup_id
 
     # Wait for worker loop to process
     await asyncio.sleep(0.3)

@@ -1,5 +1,6 @@
 """FastAPI REST API routes and WebSocket live timeline streaming."""
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -164,14 +165,30 @@ async def correlate_case_events(
     service: TimelineServiceDep,
     pipeline: PipelineDep,
 ) -> CorrelationResponse:
-    # Query case events
-    query = TimelineQuery(
-        case_id=payload.case_id,
-        limit=1000,
-    )
-    resp = await service.query_timeline(query)
+    # Query case events paginated in chunks to avoid truncation on large cases
+    all_events: list[TimelineEvent] = []
+    chunk_size = 1000
+    offset = 0
+    while True:
+        query = TimelineQuery(
+            case_id=payload.case_id,
+            start_time=payload.start_time,
+            end_time=payload.end_time,
+            limit=chunk_size,
+            offset=offset,
+        )
+        resp = await service.query_timeline(query)
+        all_events.extend(resp.events)
+        if len(resp.events) < chunk_size or len(all_events) >= resp.total_events:
+            break
+        offset += chunk_size
+
+    if payload.channel_ids:
+        channel_set = set(payload.channel_ids)
+        all_events = [e for e in all_events if e.channel_id in channel_set]
+
     correlations = pipeline.correlator.correlate_batch(
-        resp.events, custom_window_seconds=payload.window_seconds
+        all_events, custom_window_seconds=payload.window_seconds
     )
     return CorrelationResponse(
         case_id=payload.case_id,
@@ -304,35 +321,74 @@ async def get_pipeline_metrics(
 
 
 class WebSocketConnectionManager:
-    """Manages active live WebSocket subscribers."""
+    """Manages active live WebSocket subscribers with per-case isolation and non-blocking queues."""
 
-    def __init__(self) -> None:
-        self.active_connections: list[WebSocket] = []
+    def __init__(self, max_queue_size: int = 500) -> None:
+        self._case_subscribers: dict[str, dict[WebSocket, asyncio.Queue[str]]] = {}
+        self._max_queue_size = max_queue_size
 
-    async def connect(self, websocket: WebSocket) -> None:
+    async def connect(self, websocket: WebSocket, case_id: str) -> asyncio.Queue[str]:
         await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info("WebSocket client connected. Total clients: %d", len(self.active_connections))
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=self._max_queue_size)
+        if case_id not in self._case_subscribers:
+            self._case_subscribers[case_id] = {}
+        self._case_subscribers[case_id][websocket] = queue
+        total = sum(len(subs) for subs in self._case_subscribers.values())
+        logger.info("WebSocket client connected for case %s. Total clients: %d", case_id, total)
+        return queue
 
-    def disconnect(self, websocket: WebSocket) -> None:
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
+    def disconnect(self, websocket: WebSocket, case_id: str) -> None:
+        if case_id in self._case_subscribers:
+            self._case_subscribers[case_id].pop(websocket, None)
+            if not self._case_subscribers[case_id]:
+                del self._case_subscribers[case_id]
+        total = sum(len(subs) for subs in self._case_subscribers.values())
         logger.info(
-            "WebSocket client disconnected. Remaining clients: %d", len(self.active_connections)
+            "WebSocket client disconnected from case %s. Remaining clients: %d", case_id, total
         )
 
     async def broadcast(self, message: dict[str, Any]) -> None:
-        """Send message to all connected clients."""
-        text = json.dumps(message)
-        dead_connections: list[WebSocket] = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(text)
-            except Exception:
-                dead_connections.append(connection)
+        """Non-blocking broadcast to subscribers isolated by case_id.
 
-        for dead in dead_connections:
-            self.disconnect(dead)
+        Uses bounded per-client queues and put_nowait to guarantee that slow or
+        stalled WebSocket clients never block ingestion pipeline worker loops.
+        """
+        text = json.dumps(message)
+        target_case_id = self._extract_case_id(message)
+
+        target_queues: list[asyncio.Queue[str]] = []
+        if target_case_id is not None:
+            if target_case_id in self._case_subscribers:
+                target_queues.extend(self._case_subscribers[target_case_id].values())
+        else:
+            # Untagged or system-wide message: dispatch to all case subscribers
+            for subs in self._case_subscribers.values():
+                target_queues.extend(subs.values())
+
+        for q in target_queues:
+            try:
+                q.put_nowait(text)
+            except asyncio.QueueFull:
+                logger.warning(
+                    "WebSocket client queue full (max=%d). Dropping live message to prevent backpressure.",
+                    self._max_queue_size,
+                )
+
+    @staticmethod
+    def _extract_case_id(message: dict[str, Any]) -> str | None:
+        if "case_id" in message and message["case_id"]:
+            return str(message["case_id"])
+        if "event" in message and isinstance(message["event"], dict) and message["event"].get("case_id"):
+            return str(message["event"]["case_id"])
+        if (
+            "correlation" in message
+            and isinstance(message["correlation"], dict)
+            and message["correlation"].get("case_id")
+        ):
+            return str(message["correlation"]["case_id"])
+        if "data" in message and isinstance(message["data"], dict) and message["data"].get("case_id"):
+            return str(message["data"]["case_id"])
+        return None
 
 
 ws_manager = WebSocketConnectionManager()
@@ -340,17 +396,48 @@ ws_router = APIRouter(tags=["WebSocket"])
 
 
 @ws_router.websocket("/ws/live-timeline")
-async def websocket_live_timeline(websocket: WebSocket) -> None:
-    """Live WebSocket feed streaming newly generated timeline events and correlations."""
-    await ws_manager.connect(websocket)
+async def websocket_live_timeline(
+    websocket: WebSocket,
+    case_id: str | None = Query(None, description="Forensic case identifier (required)"),
+) -> None:
+    """Live WebSocket feed streaming newly generated timeline events and correlations for a case."""
+    if not case_id or not case_id.strip():
+        # Reject without case_id with policy violation WS 1008
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="case_id query parameter is required for live timeline subscription",
+        )
+        return
+
+    clean_case_id = case_id.strip()
+    queue = await ws_manager.connect(websocket, clean_case_id)
+
+    async def send_worker() -> None:
+        try:
+            while True:
+                msg = await queue.get()
+                await websocket.send_text(msg)
+                queue.task_done()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.debug("WebSocket client send loop terminated: %s", exc)
+
+    sender_task = asyncio.create_task(send_worker())
+
     try:
         while True:
-            # Keep-alive heartbeat / listen for client ping or filter requests
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
+        pass
     except Exception as exc:
         logger.warning("WebSocket error: %s", exc)
-        ws_manager.disconnect(websocket)
+    finally:
+        sender_task.cancel()
+        try:
+            await sender_task
+        except asyncio.CancelledError:
+            pass
+        ws_manager.disconnect(websocket, clean_case_id)

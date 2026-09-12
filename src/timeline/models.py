@@ -76,6 +76,8 @@ class TimelineEventModel(Base):
     file_offset_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     pts: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     dts: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    time_base_num: Mapped[int] = mapped_column(Integer, default=1)
+    time_base_den: Mapped[int] = mapped_column(Integer, default=1000)
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
     source_reference_json: Mapped[str] = mapped_column(Text, default="{}")
     anomaly_flags_json: Mapped[str] = mapped_column(Text, default="[]")

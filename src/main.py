@@ -66,7 +66,7 @@ app = FastAPI(**app_kwargs)
 # Allow CORS for Flutter Frontend (Module #6)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
